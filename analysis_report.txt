@@ -1,0 +1,96 @@
+
+===========================================================
+           MEDICAL SYMPTOM ANALYSIS REPORT
+===========================================================
+
+SUMMARY:
+-----------------------------------------------------------
+Based on the analysis of your symptoms, the following conditions may be present:
+- There is a possibility of 149 (matched symptoms: cough,high_fever,breathlessness,family_history,mucoid_sputum, fatigue,cough,high_fever,breathlessness,family_history,mucoid_sputum, average similarity: 0.774).
+- There is a possibility of 402 (matched symptoms: vomiting,sunken_eyes,dehydration,diarrhoea, vomiting,sunken_eyes,diarrhoea, average similarity: 0.7877).
+- There is a possibility of 447 (matched symptoms: vomiting,breathlessness,sweating,chest_pain, average similarity: 0.7988).
+- There is a possibility of 35 (matched symptoms: continuous_sneezing,shivering,chills,watering_from_eyes, continuous_sneezing,shivering,watering_from_eyes, average similarity: 0.6693).
+- There is a possibility of 0 (matched symptoms: vomiting,headache,nausea,spinning_movements,loss_of_balance,unsteadiness, average similarity: 0.7731).
+- There is a possibility of 577 (matched symptoms: Signs and symptoms of lip cancer include:  A flat or slightly raised whitish discoloration of the lip A sore on your lip that won't heal Tingling, pain or numbness of the lips or the skin around the mouth , average similarity: 0.7961).
+- There is a possibility of 7 (matched symptoms: skin_rash,pus_filled_pimples,blackheads,scurring, average similarity: 0.7874).
+- There is a possibility of 72 (matched symptoms: I have been having a lot of pain in my joints and muscles. My neck is stiff and I have a hard time moving around. I also have a lot of pain when I try to steer my car., average similarity: 0.8759).
+- There is a possibility of 308 (matched symptoms: I have been having migraines and headaches. I can't sleep. My whole body is shaking and shivering. I feel dizzy sometimes., average similarity: 0.8759).
+- There is a possibility of 234 (matched symptoms: I've been feeling really run down lately. I've been having a lot of trouble breathing and my nose is constantly running. I also have a lot of throat mucus and my lymph nodes are inflamed., average similarity: 0.8614).
+
+HIGH RISK ALERTS:
+-----------------------------------------------------------
+* High risk alert for disease '72' based on symptoms ['I have been having a lot of pain in my joints and muscles. My neck is stiff and I have a hard time moving around. I also have a lot of pain when I try to steer my car.'].
+* High risk alert for disease '308' based on symptoms ["I have been having migraines and headaches. I can't sleep. My whole body is shaking and shivering. I feel dizzy sometimes."].
+* High risk alert for disease '234' based on symptoms ["I've been feeling really run down lately. I've been having a lot of trouble breathing and my nose is constantly running. I also have a lot of throat mucus and my lymph nodes are inflamed."].
+
+DETAILED ANALYSIS:
+-----------------------------------------------------------
+
+Condition: 149
+Confidence: 77.40%
+Matched Symptoms: 
+  - cough,high_fever,breathlessness,family_history,mucoid_sputum
+  - fatigue,cough,high_fever,breathlessness,family_history,mucoid_sputum
+
+
+Condition: 402
+Confidence: 78.77%
+Matched Symptoms: 
+  - vomiting,sunken_eyes,dehydration,diarrhoea
+  - vomiting,sunken_eyes,diarrhoea
+
+
+Condition: 447
+Confidence: 79.88%
+Matched Symptoms: 
+  - vomiting,breathlessness,sweating,chest_pain
+
+
+Condition: 35
+Confidence: 66.93%
+Matched Symptoms: 
+  - continuous_sneezing,shivering,chills,watering_from_eyes
+  - continuous_sneezing,shivering,watering_from_eyes
+
+
+Condition: 0
+Confidence: 77.31%
+Matched Symptoms: 
+  - vomiting,headache,nausea,spinning_movements,loss_of_balance,unsteadiness
+
+
+Condition: 577
+Confidence: 79.61%
+Matched Symptoms: 
+  - Signs and symptoms of lip cancer include:  A flat or slightly raised whitish discoloration of the lip A sore on your lip that won't heal Tingling, pain or numbness of the lips or the skin around the mouth 
+
+
+Condition: 7
+Confidence: 78.74%
+Matched Symptoms: 
+  - skin_rash,pus_filled_pimples,blackheads,scurring
+
+
+Condition: 72
+Confidence: 87.59%
+Matched Symptoms: 
+  - I have been having a lot of pain in my joints and muscles. My neck is stiff and I have a hard time moving around. I also have a lot of pain when I try to steer my car.
+
+
+Condition: 308
+Confidence: 87.59%
+Matched Symptoms: 
+  - I have been having migraines and headaches. I can't sleep. My whole body is shaking and shivering. I feel dizzy sometimes.
+
+
+Condition: 234
+Confidence: 86.14%
+Matched Symptoms: 
+  - I've been feeling really run down lately. I've been having a lot of trouble breathing and my nose is constantly running. I also have a lot of throat mucus and my lymph nodes are inflamed.
+
+
+===========================================================
+NOTE: The 404 errors indicate that the OpenFDA API couldn't 
+find adverse event data for these specific conditions.
+This is normal for numeric condition codes or rare conditions.
+===========================================================
