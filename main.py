@@ -12,7 +12,11 @@ from numpy import dot
 from numpy.linalg import norm
 from fastapi.staticfiles import StaticFiles
 from collections import defaultdict
+import time
+import urllib.parse
+import os
 
+# Import your recorder function
 from static.recorder import record_and_transcribe
 
 # ----------------------------
@@ -28,14 +32,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount the "static" folder for static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Create the static directory if it doesn't exist
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    os.makedirs(static_dir)
+    print(f"[DEBUG] Created static directory at {static_dir}")
+
+# Now mount the static directory
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # ----------------------------
 # Utility Functions for Prediction
 # ----------------------------
 def cosine_similarity(vec1, vec2):
     """Compute cosine similarity between two vectors."""
+    # Debug: check the types
+    print("[DEBUG] In cosine_similarity:")
+    print("        type(vec1) =", type(vec1), "shape:", getattr(vec1, "shape", None))
+    print("        type(vec2) =", type(vec2), "shape:", getattr(vec2, "shape", None))
     return dot(vec1, vec2) / (norm(vec1) * norm(vec2))
 
 def embed_text(text: str):
@@ -47,42 +61,77 @@ def embed_text(text: str):
     with torch.no_grad():
         outputs = model(**inputs)
     cls_embedding = outputs.last_hidden_state[:, 0, :]
-    return cls_embedding.squeeze().numpy()
+    embedding_np = cls_embedding.squeeze().numpy()
+    # Debug
+    print("[DEBUG] embed_text:", text[:30], "... => embedding shape:", embedding_np.shape)
+    return embedding_np
 
 def find_similar_symptoms(user_symptom, df, top_k=3, threshold=0.75):
     """
     Given a user symptom, compute cosine similarity with each symptom in the dataset.
     Returns top matches meeting the threshold.
     """
+    print(f"[DEBUG] find_similar_symptoms called with user_symptom='{user_symptom}' threshold={threshold}")
     user_emb = embed_text(user_symptom.lower())
     similarities = []
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
+        # Debug: check the type of row["symptom_embedding"]
+        if not isinstance(row["symptom_embedding"], np.ndarray):
+            print(f"[DEBUG] WARNING: row['symptom_embedding'] is not an ndarray at index={idx}. It is:", type(row["symptom_embedding"]))
         sim_score = cosine_similarity(user_emb, row["symptom_embedding"])
         similarities.append((row["text"], row["label"], sim_score))
     similarities.sort(key=lambda x: x[2], reverse=True)
     filtered = [match for match in similarities if match[2] >= threshold]
     return filtered[:top_k]
 
-def query_adverse_events(disease, limit=2):
+def query_adverse_events(disease, limit=2, retries=3, api_key=None):
     """
     Query the openFDA FAERS API for adverse events related to a given disease.
+    Handles missing results, encodes search terms correctly, and includes a retry mechanism.
     """
-    url = "https://api.fda.gov/drug/event.json"
+    base_url = "https://api.fda.gov/drug/event.json"
+    encoded_disease = urllib.parse.quote(disease)
+
     params = {
-        "search": f'patient.reaction.reactionmeddrapt:"{disease}"',
+        "search": f'patient.reaction.reactionmeddrapt:"{encoded_disease}"',
         "limit": limit
     }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Error querying adverse events: {response.status_code}")
-        return None
+    
+    if api_key:
+        params["api_key"] = api_key  # Use API key if available
+
+    attempt = 0
+    while attempt < retries:
+        print(f"[DEBUG] query_adverse_events: Attempt {attempt+1}/{retries} for disease='{disease}'")
+        response = requests.get(base_url, params=params)
+        
+        print("[DEBUG] Received status code:", response.status_code)
+        if response.status_code == 200:
+            data = response.json()
+            print("[DEBUG] query_adverse_events: JSON keys:", list(data.keys()))
+            if "results" in data and data["results"]:
+                return data  # Return only if data is present
+            print(f"[DEBUG] No results found for '{disease}'. Returning error.")
+            return {"error": f"No adverse events found for {disease}"}
+
+        elif response.status_code == 404:
+            print(f"[DEBUG] 404 Error: Disease '{disease}' not found in openFDA database.")
+            return {"error": f"Disease '{disease}' not found in openFDA database."}
+        
+        elif response.status_code in [429, 500, 502, 503, 504]:
+            print(f"[DEBUG] Server issue {response.status_code}. Retrying ({attempt+1}/{retries})...")
+            time.sleep(2 ** attempt)  # Exponential backoff
+            attempt += 1
+        else:
+            print(f"[DEBUG] Unexpected error: {response.status_code}, {response.text}")
+            return {"error": f"Unexpected API error: {response.status_code}"}
+
+    print("[DEBUG] query_adverse_events: Gave up after multiple retries.")
+    return {"error": "API request failed after multiple attempts"}
 
 # ----------------------------
 # Multi-Symptom Extraction using NER
 # ----------------------------
-# Load a biomedical NER pipeline.
 ner_pipeline = pipeline("ner", model="d4data/biomedical-ner-all", aggregation_strategy="simple")
 
 def extract_symptoms_ner(text: str):
@@ -90,6 +139,7 @@ def extract_symptoms_ner(text: str):
     Extract multiple symptoms from text using a biomedical NER model.
     Returns a list of unique symptom strings.
     """
+    print(f"[DEBUG] extract_symptoms_ner called with text[:50]='{text[:50]}'...")
     ner_results = ner_pipeline(text)
     symptoms = []
     for entity in ner_results:
@@ -98,23 +148,24 @@ def extract_symptoms_ner(text: str):
     
     text_lower = text.lower()
     
-    # Add more medical keywords for better extraction
-    keywords = ["pain", "ache", "sore", "fever", "cough", "breathing", "breath", 
-                "tired", "fatigue", "dizzy", "nausea", "vomit", "headache", "migraine",
-                "asthma", "allergy", "swelling", "rash", "itching", "blood", 
-                "pressure", "diabetes", "heart", "chest", "stomach", "back", 
-                "joint", "muscle", "throat", "nose", "ear", "eye", "skin",
-                "shaking", "shivering", "trembling", "sleep", "insomnia", "cold",
-                "hot", "sweating", "chills", "numbness", "tingling", "burning"]
+    # Additional medical keywords
+    keywords = [
+        "pain", "ache", "sore", "fever", "cough", "breathing", "breath", 
+        "tired", "fatigue", "dizzy", "nausea", "vomit", "headache", "migraine",
+        "asthma", "allergy", "swelling", "rash", "itching", "blood", 
+        "pressure", "diabetes", "heart", "chest", "stomach", "back", 
+        "joint", "muscle", "throat", "nose", "ear", "eye", "skin",
+        "shaking", "shivering", "trembling", "sleep", "insomnia", "cold",
+        "hot", "sweating", "chills", "numbness", "tingling", "burning"
+    ]
     
-    # Check for medical keywords in the text
+    # Check for medical keywords
     words = text_lower.split()
     for i, word in enumerate(words):
         for keyword in keywords:
             if keyword in word and word not in [s.lower() for s in symptoms]:
                 # Try to capture multi-word symptoms by looking at surrounding words
                 if i > 0 and i < len(words) - 1:
-                    # Check if previous word is an adjective
                     if words[i-1] in ["severe", "mild", "chronic", "acute", "persistent", "recurring", "intense"]:
                         symptoms.append(f"{words[i-1]} {word}")
                     else:
@@ -131,11 +182,11 @@ def extract_symptoms_ner(text: str):
         "high fever", "high temperature", "feeling weak", "weakness", "dizziness",
         "feeling tired", "exhaustion", "lack of energy", "loss of appetite"
     ]
-    
     for phrase in symptom_phrases:
-        if phrase in text.lower() and phrase not in [s.lower() for s in symptoms]:
+        if phrase in text_lower and phrase not in [s.lower() for s in symptoms]:
             symptoms.append(phrase)
-    # Extract duration and severity information
+    
+    # Extract duration and severity
     duration_terms = ["days", "weeks", "months", "years", "chronic", "acute", "persistent", "recurring"]
     severity_terms = ["mild", "moderate", "severe", "intense", "unbearable", "slight", "extreme"]
     
@@ -153,9 +204,10 @@ def extract_symptoms_ner(text: str):
                 if next_words and next_words[0] in keywords:
                     symptoms.append(f"{term} {next_words[0]}")
     
-    # Print extracted symptoms for debugging
     if symptoms:
-        print(f"Extracted symptoms: {symptoms}")
+        print(f"[DEBUG] Extracted symptoms: {symptoms}")
+    else:
+        print("[DEBUG] No symptoms extracted.")
     return list(set(symptoms))
 
 # ----------------------------
@@ -166,6 +218,7 @@ def aggregate_predictions(predictions):
     Aggregate predictions by disease. For each disease, average similarity scores,
     merge matched symptoms, and combine adverse events.
     """
+    print("[DEBUG] aggregate_predictions called with", len(predictions), "prediction items.")
     aggregated = defaultdict(lambda: {
         "disease": None,
         "matched_symptoms": [],
@@ -179,7 +232,15 @@ def aggregate_predictions(predictions):
         aggregated[disease]["matched_symptoms"].append(pred["matched_symptom"])
         aggregated[disease]["similarity_sum"] += pred["similarity"]
         aggregated[disease]["count"] += 1
-        aggregated[disease]["adverse_events"].extend(pred["adverse_events"])
+
+        # Debug around adverse_events
+        print(f"[DEBUG] Merging adverse_events for disease='{disease}' => Type of pred['adverse_events']: {type(pred['adverse_events'])}")
+        try:
+            aggregated[disease]["adverse_events"].extend(pred["adverse_events"])
+        except TypeError as e:
+            print("[DEBUG] ERROR in .extend() - pred['adverse_events'] is not iterable:", pred["adverse_events"])
+            raise
+
     result = []
     for disease, data in aggregated.items():
         data["average_similarity"] = round(data["similarity_sum"] / data["count"], 4)
@@ -191,15 +252,20 @@ def generate_summary(aggregated_predictions, alerts):
     """
     Generate a descriptive summary paragraph based on aggregated predictions and alerts.
     """
+    print("[DEBUG] generate_summary called.")
     if aggregated_predictions:
         summary = "Based on the analysis of your symptoms, the following conditions may be present:"
         for agg in aggregated_predictions:
-            summary += f"\n- There is a possibility of {agg['disease']} (matched symptoms: {', '.join(agg['matched_symptoms'])}, average similarity: {agg['average_similarity']})."
+            summary += (
+                f"\n- There is a possibility of {agg['disease']} "
+                f"(matched symptoms: {', '.join(agg['matched_symptoms'])}, "
+                f"average similarity: {agg['average_similarity']})."
+            )
         if alerts:
             summary += "\n\nHigh risk alerts: " + " ".join(alerts)
         else:
             summary += "\n\nNo immediate high risk alerts were detected."
-        summary += "\nIt is highly recommended to consult with a healthcare professional for further evaluation and necessary precautions."
+        summary += "\nIt is highly recommended to consult with a healthcare professional for further evaluation."
     else:
         summary = "No conditions could be predicted from the provided symptoms."
     return summary
@@ -207,7 +273,7 @@ def generate_summary(aggregated_predictions, alerts):
 # ----------------------------
 # Load Dataset & Bioformer‑8L Model
 # ----------------------------
-print("Loading dataset, Bioformer‑8L model, and tokenizer...")
+print("[DEBUG] Loading dataset, Bioformer‑8L model, and tokenizer...")
 
 data_files = {
     "train": "symptom-disease-train-dataset.csv",
@@ -216,7 +282,7 @@ data_files = {
 dataset = load_dataset("duxprajapati/symptom-disease-dataset", data_files=data_files)
 train_df = dataset["train"].to_pandas()
 
-# For demo purposes, embed a subset (first 10 rows)
+# For demo, embed only a subset
 NUM_EXAMPLES = 100
 train_df = train_df.head(NUM_EXAMPLES)
 
@@ -224,12 +290,14 @@ tokenizer = AutoTokenizer.from_pretrained("bioformers/bioformer-8L")
 model = AutoModel.from_pretrained("bioformers/bioformer-8L")
 
 symptom_embeddings = []
-for symptom in train_df["text"]:
-    embedding_vector = embed_text(symptom.lower())
-    symptom_embeddings.append(embedding_vector)
+for i, symptom in enumerate(train_df["text"]):
+    emb_vec = embed_text(symptom.lower())
+    # Debug
+    print(f"[DEBUG] Row {i} => symptom='{symptom}' => emb_vec shape={emb_vec.shape}")
+    symptom_embeddings.append(emb_vec)
 train_df["symptom_embedding"] = symptom_embeddings
 
-print("Initialization complete.")
+print("[DEBUG] Initialization complete.")
 
 # ----------------------------
 # Pydantic Model for API
@@ -247,33 +315,31 @@ def read_root():
 @app.post("/predict")
 def predict(input_data: TranscriptInput):
     transcript = input_data.transcript.strip()
+    print("[DEBUG] /predict called with transcript:", transcript)
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript cannot be empty.")
 
     # Extract multiple symptoms using enhanced NER
     extracted_symptoms = extract_symptoms_ner(transcript)
     
-    # If no symptoms extracted, use the entire transcript as a single symptom
     if not extracted_symptoms:
-        print(f"No symptoms extracted from: '{transcript}'. Using full transcript for matching.")
+        print("[DEBUG] No symptoms extracted. Using full transcript for matching.")
         extracted_symptoms = [transcript]
     else:
-        # Also try matching the combination of symptoms for better context
         if len(extracted_symptoms) >= 2:
-            combined_symptoms = " and ".join(extracted_symptoms[:3])  # Combine top 3 symptoms
+            combined_symptoms = " and ".join(extracted_symptoms[:3])
             extracted_symptoms.append(combined_symptoms)
-        print(f"Using extracted symptoms for matching: {extracted_symptoms}")
+        print("[DEBUG] Using extracted symptoms for matching:", extracted_symptoms)
     
-    # For each extracted symptom, perform similarity matching
     all_matches = []
     for symptom in extracted_symptoms:
-        # Adjust threshold based on symptom length - require higher threshold for longer text
         dynamic_threshold = min(0.85, 0.65 + (len(symptom.split()) / 100))
+        print(f"[DEBUG] Checking symptom='{symptom}' with threshold={dynamic_threshold}")
         matches = find_similar_symptoms(symptom, train_df, top_k=2, threshold=dynamic_threshold)
         if matches:
             all_matches.extend(matches)
     
-    # After getting all_matches, add filtering step
+    # Filter matches by keyword overlap
     filtered_matches = []
     extracted_keywords = set()
     for symptom in extracted_symptoms:
@@ -281,14 +347,13 @@ def predict(input_data: TranscriptInput):
     
     for match in all_matches:
         matched_symptom, disease, similarity = match
-        # Check if there's at least some keyword overlap
         matched_keywords = set(matched_symptom.lower().split())
         if any(keyword in matched_keywords for keyword in extracted_keywords):
             filtered_matches.append(match)
         else:
-            print(f"Filtered out unrelated match: {matched_symptom} (similarity: {similarity})")
+            print(f"[DEBUG] Filtered out unrelated match: {match}")
     
-    all_matches = filtered_matches if filtered_matches else all_matches  # Use filtered if not empty
+    all_matches = filtered_matches if filtered_matches else all_matches
     
     if not all_matches:
         return {
@@ -296,92 +361,101 @@ def predict(input_data: TranscriptInput):
             "aggregated_predictions": [],
             "alerts": []
         }
-    
+
     predictions = []
     for match in all_matches:
         matched_symptom, disease, similarity = match
-        # Clean up disease name - remove numbers and convert to proper title case
         clean_disease = disease
-        # Remove numeric codes that might appear in disease names
+
+        # Remove digits from disease name
         if any(char.isdigit() for char in clean_disease):
-            # Try to extract just the text part of the disease
             text_parts = ''.join([c if not c.isdigit() else ' ' for c in clean_disease]).split()
             if text_parts:
                 clean_disease = ' '.join(text_parts).strip()
-        
-        # Convert to title case for better readability
+
         clean_disease = ' '.join(word.capitalize() for word in clean_disease.split())
-        
         similarity_value = float(round(similarity, 4))
+
+        # Query openFDA
         adverse_data = query_adverse_events(clean_disease, limit=2)
-        adverse_events = adverse_data.get("results", []) if adverse_data else []
+        print("[DEBUG] Type of adverse_data:", type(adverse_data))
+        print("[DEBUG] Content of adverse_data:", adverse_data)
+
+        # Decide how to store adverse_events
+        if isinstance(adverse_data, dict):
+            if "results" in adverse_data and isinstance(adverse_data["results"], list):
+                adverse_events = adverse_data["results"]
+            elif "error" in adverse_data:
+                adverse_events = []
+                print("[DEBUG] openFDA error message:", adverse_data["error"])
+            else:
+                adverse_events = []
+                print("[DEBUG] Warning: Unexpected format in adverse_data dict.")
+        else:
+            adverse_events = []
+            print("[DEBUG] Warning: adverse_data is not a dict.")
+
+        print("[DEBUG] Final adverse_events type:", type(adverse_events))
         predictions.append({
             "matched_symptom": matched_symptom,
-            "disease": clean_disease,  # Use the cleaned disease name
+            "disease": clean_disease,
             "similarity": similarity_value,
             "adverse_events": adverse_events
         })
-    
-    # Aggregate predictions by disease.
+
     aggregated_predictions = aggregate_predictions(predictions)
-    
-    # Create alerts based on aggregated average similarity.
+
+    # Create alerts
     alerts = []
     for agg in aggregated_predictions:
         if agg["average_similarity"] > 0.85:
             alerts.append(
                 f"High risk alert for disease '{agg['disease']}' based on symptoms {agg['matched_symptoms']}."
             )
-    
-    # Generate a descriptive summary paragraph.
+
     summary = generate_summary(aggregated_predictions, alerts)
-    
-    return {"summary": summary, "aggregated_predictions": aggregated_predictions, "alerts": alerts}
+    return {
+        "summary": summary,
+        "aggregated_predictions": aggregated_predictions,
+        "alerts": alerts
+    }
 
 # ----------------------------
 # Command-line Mode: Record & Predict
 # ----------------------------
 def format_prediction_results(result):
     """Format prediction results in a clear, readable way"""
-    
-    formatted_output = """
+    formatted_output = f"""
 ===========================================================
            MEDICAL SYMPTOM ANALYSIS REPORT
 ===========================================================
 
 SUMMARY:
 -----------------------------------------------------------
-{}
+{result['summary'].split("\\n\\nHigh risk alerts:")[0]}
 
 HIGH RISK ALERTS:
 -----------------------------------------------------------
-""".format(result['summary'].split("\n\nHigh risk alerts:")[0])
-
-    # Add alerts section
+"""
     if result['alerts']:
         for alert in result['alerts']:
-            formatted_output += "* {}\n".format(alert)
+            formatted_output += f"* {alert}\n"
     else:
         formatted_output += "No high risk alerts detected.\n"
     
-    # Add detailed predictions section
     formatted_output += """
 DETAILED ANALYSIS:
 -----------------------------------------------------------
 """
     
     for pred in result['aggregated_predictions']:
-        formatted_output += """
-Condition: {}
-Confidence: {:.2f}%
+        formatted_output += f"""
+Condition: {pred['disease']}
+Confidence: {pred['average_similarity'] * 100:.2f}%
 Matched Symptoms: 
-  - {}
+  - {chr(10).join(pred['matched_symptoms'])}
 
-""".format(
-            pred['disease'],
-            pred['average_similarity'] * 100,
-            "\n  - ".join(pred['matched_symptoms'])
-        )
+"""
     
     formatted_output += """
 ===========================================================
@@ -390,62 +464,43 @@ find adverse event data for these specific conditions.
 This is normal for numeric condition codes or rare conditions.
 ===========================================================
 """
-    
     return formatted_output
-# After the format_prediction_results function, add the record_and_predict function:
 
 def record_and_predict():
-    print("Starting audio recording and transcription...")
-    # The record_and_transcribe function doesn't return the transcript
-    # It writes to a file instead, so we need to read that file
+    print("[DEBUG] Starting audio recording and transcription...")
     record_and_transcribe()
     try:
-        # Read the transcript from the output file
         with open("output.txt", "r", encoding="utf-8") as f:
             content = f.read()
-        
-        # Parse the content to extract the transcript
+        # Debug: check the file content
+        print("[DEBUG] Read from output.txt => Type:", type(content))
+        print("[DEBUG] Content:", content)
+
         transcript = ""
         for line in content.split("\n"):
             if line.startswith("Transcription:"):
-                transcript += line.replace("Transcription:", "").strip() + " "
+                transcript_line = line.replace("Transcription:", "").strip()
+                transcript += transcript_line + " "
         
         transcript = transcript.strip()
-        print("\nFinal Transcript:")
-        print(transcript)
+        print("[DEBUG] Final Transcript after parsing:", transcript)
         
-        # Check if transcript is empty
         if not transcript:
-            print("No speech detected. Please try again and speak clearly into the microphone.")
+            print("[DEBUG] No speech detected. Please try again.")
             return
         
-        # Create a TranscriptInput and call the predict function directly
         input_data = TranscriptInput(transcript=transcript)
         result = predict(input_data)
         
-        # Format the results in a more readable way
         formatted_result = format_prediction_results(result)
-        print("\nPrediction Result:")
+        print("\n[DEBUG] Prediction Result:")
         print(formatted_result)
-        
         # Save formatted result to a file
         with open("analysis_report.txt", "w", encoding="utf-8") as f:
             f.write(formatted_result)
-        print("Analysis report saved to analysis_report.txt")
+        print("[DEBUG] Analysis report saved to analysis_report.txt")
         
     except FileNotFoundError:
-        print("No output file found. Recording may have failed.")
+        print("[DEBUG] No output file found. Recording may have failed.")
     except Exception as e:
-        print(f"Error processing transcript: {e}")
-
-# ----------------------------
-# Main Block
-# ----------------------------
-if __name__ == "__main__":
-    # Uncomment the desired mode:
-    
-    # Option 1: Run as FastAPI web server
-    # uvicorn.run(app, host="0.0.0.0", port=8000)
-    
-    # Option 2: Run in command-line mode (record audio, transcribe, and predict)
-    record_and_predict()
+        print(f"[DEBUG] Error processing transcript: {e}")
