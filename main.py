@@ -36,9 +36,7 @@ app.add_middleware(
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(static_dir):
     os.makedirs(static_dir)
-    print(f"[DEBUG] Created static directory at {static_dir}")
 
-# Now mount the static directory
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # ----------------------------
@@ -60,29 +58,16 @@ def embed_text(text: str):
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
     with torch.no_grad():
         outputs = model(**inputs)
-    cls_embedding = outputs.last_hidden_state[:, 0, :]
-    embedding_np = cls_embedding.squeeze().numpy()
-    # Debug
-    print("[DEBUG] embed_text:", text[:30], "... => embedding shape:", embedding_np.shape)
-    return embedding_np
+    return outputs.last_hidden_state[:, 0, :].squeeze().numpy()
 
 def find_similar_symptoms(user_symptom, df, top_k=3, threshold=0.75):
-    """
-    Given a user symptom, compute cosine similarity with each symptom in the dataset.
-    Returns top matches meeting the threshold.
-    """
-    print(f"[DEBUG] find_similar_symptoms called with user_symptom='{user_symptom}' threshold={threshold}")
     user_emb = embed_text(user_symptom.lower())
     similarities = []
-    for idx, row in df.iterrows():
-        # Debug: check the type of row["symptom_embedding"]
-        if not isinstance(row["symptom_embedding"], np.ndarray):
-            print(f"[DEBUG] WARNING: row['symptom_embedding'] is not an ndarray at index={idx}. It is:", type(row["symptom_embedding"]))
+    for _, row in df.iterrows():
         sim_score = cosine_similarity(user_emb, row["symptom_embedding"])
         similarities.append((row["text"], row["label"], sim_score))
     similarities.sort(key=lambda x: x[2], reverse=True)
-    filtered = [match for match in similarities if match[2] >= threshold]
-    return filtered[:top_k]
+    return [match for match in similarities if match[2] >= threshold][:top_k]
 
 def query_adverse_events(disease, limit=2, retries=3, api_key=None):
     """
@@ -91,7 +76,7 @@ def query_adverse_events(disease, limit=2, retries=3, api_key=None):
     """
     base_url = "https://api.fda.gov/drug/event.json"
     encoded_disease = urllib.parse.quote(disease)
-
+    
     params = {
         "search": f'patient.reaction.reactionmeddrapt:"{encoded_disease}"',
         "limit": limit
@@ -102,7 +87,6 @@ def query_adverse_events(disease, limit=2, retries=3, api_key=None):
 
     attempt = 0
     while attempt < retries:
-        print(f"[DEBUG] query_adverse_events: Attempt {attempt+1}/{retries} for disease='{disease}'")
         response = requests.get(base_url, params=params)
         
         print("[DEBUG] Received status code:", response.status_code)
@@ -117,16 +101,11 @@ def query_adverse_events(disease, limit=2, retries=3, api_key=None):
         elif response.status_code == 404:
             print(f"[DEBUG] 404 Error: Disease '{disease}' not found in openFDA database.")
             return {"error": f"Disease '{disease}' not found in openFDA database."}
-        
         elif response.status_code in [429, 500, 502, 503, 504]:
-            print(f"[DEBUG] Server issue {response.status_code}. Retrying ({attempt+1}/{retries})...")
-            time.sleep(2 ** attempt)  # Exponential backoff
+            time.sleep(2 ** attempt)
             attempt += 1
         else:
-            print(f"[DEBUG] Unexpected error: {response.status_code}, {response.text}")
             return {"error": f"Unexpected API error: {response.status_code}"}
-
-    print("[DEBUG] query_adverse_events: Gave up after multiple retries.")
     return {"error": "API request failed after multiple attempts"}
 
 # ----------------------------
@@ -218,7 +197,7 @@ def aggregate_predictions(predictions):
     Aggregate predictions by disease. For each disease, average similarity scores,
     merge matched symptoms, and combine adverse events.
     """
-    print("[DEBUG] aggregate_predictions called with", len(predictions), "prediction items.")
+    
     aggregated = defaultdict(lambda: {
         "disease": None,
         "matched_symptoms": [],
@@ -226,20 +205,17 @@ def aggregate_predictions(predictions):
         "count": 0,
         "adverse_events": []
     })
+    
     for pred in predictions:
         disease = pred["disease"]
         aggregated[disease]["disease"] = disease
         aggregated[disease]["matched_symptoms"].append(pred["matched_symptom"])
         aggregated[disease]["similarity_sum"] += pred["similarity"]
         aggregated[disease]["count"] += 1
-
-        # Debug around adverse_events
-        print(f"[DEBUG] Merging adverse_events for disease='{disease}' => Type of pred['adverse_events']: {type(pred['adverse_events'])}")
-        try:
+        if isinstance(pred["adverse_events"], list):
             aggregated[disease]["adverse_events"].extend(pred["adverse_events"])
-        except TypeError as e:
-            print("[DEBUG] ERROR in .extend() - pred['adverse_events'] is not iterable:", pred["adverse_events"])
-            raise
+        elif pred["adverse_events"] is not None:
+            aggregated[disease]["adverse_events"].append(pred["adverse_events"])
 
     result = []
     for disease, data in aggregated.items():
@@ -252,7 +228,7 @@ def generate_summary(aggregated_predictions, alerts):
     """
     Generate a descriptive summary paragraph based on aggregated predictions and alerts.
     """
-    print("[DEBUG] generate_summary called.")
+    
     if aggregated_predictions:
         summary = "Based on the analysis of your symptoms, the following conditions may be present:"
         for agg in aggregated_predictions:
@@ -273,41 +249,31 @@ def generate_summary(aggregated_predictions, alerts):
 # ----------------------------
 # Load Dataset & Bioformer‑8L Model
 # ----------------------------
-print("[DEBUG] Loading dataset, Bioformer‑8L model, and tokenizer...")
+print("Loading dataset, Bioformer‑8L model, and tokenizer...")
 
 data_files = {
     "train": "symptom-disease-train-dataset.csv",
     "test": "symptom-disease-test-dataset.csv"
 }
 dataset = load_dataset("duxprajapati/symptom-disease-dataset", data_files=data_files)
-train_df = dataset["train"].to_pandas()
-
-# For demo, embed only a subset
-NUM_EXAMPLES = 100
-train_df = train_df.head(NUM_EXAMPLES)
+train_df = dataset["train"].to_pandas().head(100)
 
 tokenizer = AutoTokenizer.from_pretrained("bioformers/bioformer-8L")
 model = AutoModel.from_pretrained("bioformers/bioformer-8L")
 
 symptom_embeddings = []
-for i, symptom in enumerate(train_df["text"]):
-    emb_vec = embed_text(symptom.lower())
-    # Debug
-    print(f"[DEBUG] Row {i} => symptom='{symptom}' => emb_vec shape={emb_vec.shape}")
-    symptom_embeddings.append(emb_vec)
+for symptom in train_df["text"]:
+    symptom_embeddings.append(embed_text(symptom.lower()))
 train_df["symptom_embedding"] = symptom_embeddings
 
-print("[DEBUG] Initialization complete.")
+print("Initialization complete.")
 
 # ----------------------------
 # Pydantic Model for API
 # ----------------------------
 class TranscriptInput(BaseModel):
-    transcript: str  # The transcribed text from the audio
+    transcript: str
 
-# ----------------------------
-# FastAPI Routes
-# ----------------------------
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Medical Adverse Event Prediction API!"}
@@ -315,47 +281,31 @@ def read_root():
 @app.post("/predict")
 def predict(input_data: TranscriptInput):
     transcript = input_data.transcript.strip()
-    print("[DEBUG] /predict called with transcript:", transcript)
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript cannot be empty.")
 
-    # Extract multiple symptoms using enhanced NER
-    extracted_symptoms = extract_symptoms_ner(transcript)
+    extracted_symptoms = extract_symptoms_ner(transcript) or [transcript]
     
-    if not extracted_symptoms:
-        print("[DEBUG] No symptoms extracted. Using full transcript for matching.")
-        extracted_symptoms = [transcript]
-    else:
-        if len(extracted_symptoms) >= 2:
-            combined_symptoms = " and ".join(extracted_symptoms[:3])
-            extracted_symptoms.append(combined_symptoms)
-        print("[DEBUG] Using extracted symptoms for matching:", extracted_symptoms)
-    
+    if len(extracted_symptoms) >= 2:
+        extracted_symptoms.append(" and ".join(extracted_symptoms[:3]))
+
     all_matches = []
     for symptom in extracted_symptoms:
-        dynamic_threshold = min(0.85, 0.65 + (len(symptom.split()) / 100))
-        print(f"[DEBUG] Checking symptom='{symptom}' with threshold={dynamic_threshold}")
-        matches = find_similar_symptoms(symptom, train_df, top_k=2, threshold=dynamic_threshold)
+        threshold = min(0.85, 0.65 + (len(symptom.split()) / 100))
+        matches = find_similar_symptoms(symptom, train_df, top_k=2, threshold=threshold)
         if matches:
             all_matches.extend(matches)
-    
-    # Filter matches by keyword overlap
-    filtered_matches = []
+
     extracted_keywords = set()
     for symptom in extracted_symptoms:
         extracted_keywords.update(symptom.lower().split())
     
-    for match in all_matches:
-        matched_symptom, disease, similarity = match
-        matched_keywords = set(matched_symptom.lower().split())
-        if any(keyword in matched_keywords for keyword in extracted_keywords):
-            filtered_matches.append(match)
-        else:
-            print(f"[DEBUG] Filtered out unrelated match: {match}")
+    filtered_matches = [
+        match for match in all_matches
+        if any(keyword in set(match[0].lower().split()) for keyword in extracted_keywords)
+    ]
     
-    all_matches = filtered_matches if filtered_matches else all_matches
-    
-    if not all_matches:
+    if not filtered_matches:
         return {
             "summary": "No matching symptoms found in our database. Please provide more specific medical symptoms.",
             "aggregated_predictions": [],
@@ -363,43 +313,28 @@ def predict(input_data: TranscriptInput):
         }
 
     predictions = []
-    for match in all_matches:
+    for match in filtered_matches:
         matched_symptom, disease, similarity = match
-        clean_disease = disease
-
-        # Remove digits from disease name
+        clean_disease = str(disease)
+        
         if any(char.isdigit() for char in clean_disease):
             text_parts = ''.join([c if not c.isdigit() else ' ' for c in clean_disease]).split()
-            if text_parts:
-                clean_disease = ' '.join(text_parts).strip()
-
+            clean_disease = ' '.join(text_parts).strip() if text_parts else clean_disease
+        
         clean_disease = ' '.join(word.capitalize() for word in clean_disease.split())
-        similarity_value = float(round(similarity, 4))
-
-        # Query openFDA
         adverse_data = query_adverse_events(clean_disease, limit=2)
-        print("[DEBUG] Type of adverse_data:", type(adverse_data))
-        print("[DEBUG] Content of adverse_data:", adverse_data)
-
-        # Decide how to store adverse_events
-        if isinstance(adverse_data, dict):
-            if "results" in adverse_data and isinstance(adverse_data["results"], list):
-                adverse_events = adverse_data["results"]
-            elif "error" in adverse_data:
-                adverse_events = []
-                print("[DEBUG] openFDA error message:", adverse_data["error"])
-            else:
-                adverse_events = []
-                print("[DEBUG] Warning: Unexpected format in adverse_data dict.")
+        
+        if isinstance(adverse_data, dict) and "error" in adverse_data:
+            adverse_events = []
+        elif isinstance(adverse_data, dict) and "results" in adverse_data:
+            adverse_events = adverse_data["results"][:2]
         else:
             adverse_events = []
-            print("[DEBUG] Warning: adverse_data is not a dict.")
 
-        print("[DEBUG] Final adverse_events type:", type(adverse_events))
         predictions.append({
             "matched_symptom": matched_symptom,
             "disease": clean_disease,
-            "similarity": similarity_value,
+            "similarity": float(round(similarity, 4)),
             "adverse_events": adverse_events
         })
 
@@ -413,9 +348,8 @@ def predict(input_data: TranscriptInput):
                 f"High risk alert for disease '{agg['disease']}' based on symptoms {agg['matched_symptoms']}."
             )
 
-    summary = generate_summary(aggregated_predictions, alerts)
     return {
-        "summary": summary,
+        "summary": generate_summary(aggregated_predictions, alerts),
         "aggregated_predictions": aggregated_predictions,
         "alerts": alerts
     }
@@ -432,75 +366,53 @@ def format_prediction_results(result):
 
 SUMMARY:
 -----------------------------------------------------------
-{result['summary'].split("\\n\\nHigh risk alerts:")[0]}
+{result['summary'].split("\n\nHigh risk alerts:")[0]}
 
 HIGH RISK ALERTS:
------------------------------------------------------------
-"""
-    if result['alerts']:
-        for alert in result['alerts']:
-            formatted_output += f"* {alert}\n"
-    else:
-        formatted_output += "No high risk alerts detected.\n"
+-----------------------------------------------------------"""
+    formatted_output += "\n".join(f"* {alert}" for alert in result['alerts']) if result['alerts'] else "No high risk alerts detected."
     
     formatted_output += """
 DETAILED ANALYSIS:
------------------------------------------------------------
-"""
-    
+-----------------------------------------------------------"""
     for pred in result['aggregated_predictions']:
         formatted_output += f"""
 Condition: {pred['disease']}
 Confidence: {pred['average_similarity'] * 100:.2f}%
 Matched Symptoms: 
-  - {chr(10).join(pred['matched_symptoms'])}
+  - {"  - ".join(pred['matched_symptoms'])}"""
 
-"""
-    
     formatted_output += """
 ===========================================================
 NOTE: The 404 errors indicate that the OpenFDA API couldn't 
 find adverse event data for these specific conditions.
 This is normal for numeric condition codes or rare conditions.
-===========================================================
-"""
+==========================================================="""
     return formatted_output
 
 def record_and_predict():
-    print("[DEBUG] Starting audio recording and transcription...")
     record_and_transcribe()
     try:
         with open("output.txt", "r", encoding="utf-8") as f:
-            content = f.read()
-        # Debug: check the file content
-        print("[DEBUG] Read from output.txt => Type:", type(content))
-        print("[DEBUG] Content:", content)
-
-        transcript = ""
-        for line in content.split("\n"):
-            if line.startswith("Transcription:"):
-                transcript_line = line.replace("Transcription:", "").strip()
-                transcript += transcript_line + " "
-        
-        transcript = transcript.strip()
-        print("[DEBUG] Final Transcript after parsing:", transcript)
+            transcript = " ".join(
+                line.replace("Transcription:", "").strip()
+                for line in f.read().split("\n")
+                if line.startswith("Transcription:")
+            )
         
         if not transcript:
-            print("[DEBUG] No speech detected. Please try again.")
-            return
-        
-        input_data = TranscriptInput(transcript=transcript)
-        result = predict(input_data)
-        
-        formatted_result = format_prediction_results(result)
-        print("\n[DEBUG] Prediction Result:")
-        print(formatted_result)
-        # Save formatted result to a file
+            return "No speech detected. Please try again."
+            
+        result = predict(TranscriptInput(transcript=transcript))
         with open("analysis_report.txt", "w", encoding="utf-8") as f:
-            f.write(formatted_result)
-        print("[DEBUG] Analysis report saved to analysis_report.txt")
+            f.write(format_prediction_results(result))
+        return "Analysis report saved to analysis_report.txt"
         
-    except FileNotFoundError:
-        print("[DEBUG] No output file found. Recording may have failed.")
     except Exception as e:
-        print(f"[DEBUG] Error processing transcript: {e}")
+        return f"Error processing transcript: {e}"
+
+if __name__ == "__main__":
+    print("Starting medical symptom analysis...")
+    print("Recording audio... Please speak your symptoms clearly.")
+    result = record_and_predict()
+    print(result)
